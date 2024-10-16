@@ -2,3 +2,4 @@ __pycache__
 model
 figures/*
 !figures/vol.png
+copy_temp_*
