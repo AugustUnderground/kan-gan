@@ -10,17 +10,18 @@
 (defn scale     [xmin xmax x] (/ (- x xmin) (- xmax xmin)))
 (defn unscale   [xmin xmax x] (+ (* x (- xmax xmin)) xmin))
 
-(defn trafo     [msk x] (+ (* (pt.log x) msk) (* x (- 1.0 msk))))
-(defn untrafo   [msk x] (+ (* (pt.pow 10 x) msk) (* x (- 1.0 msk))))
+(defn trafo     [msk x] (if (.item (pt.any msk)) (+ (* (pt.log x) msk) (* x (- 1.0 msk))) x))
+(defn untrafo   [msk x] (if (.item (pt.any msk)) (+ (* (pt.pow 10 x) msk) (* x (- 1.0 msk))) x))
 
 (defn make-mask [msk cols] (if msk (-> (lfor m msk (in m cols)) pt.tensor (.float))
                                    (-> cols len pt.zeros)))
 
 (defn make-dataset [path params-x params-y mask-x mask-y [ratio 0.75] [seed 666]]
-  (let [df-raw (pd.read-csv path)
-        num    (len df-raw)
+  (let [df     (pd.read-csv path)
+        ;df     (get df-raw (.all (> (. (get df-raw (+ mask-x mask-y)) values) 0.0) :axis 1))
+        num    (len df)
         split  (int (* num ratio))
-        df     (.sample df-raw num :replace False :random-state seed)
+        df     (-> df (.sample num :replace False :random-state seed))
         msk-x  (-> mask-x (make-mask params-x) (.to device))
         msk-y  (-> mask-y (make-mask params-y) (.to device))
         xs-raw (-> (. (get df params-x) values)
@@ -68,9 +69,6 @@
                      :device      device)
         fit (partial fitter λ λ-entropy optim steps α batch-size dataset)
         los (fit mdl) ]
-    (setv mdl.node-scores [])
-    (setv mdl.edge-scores [])
-    (setv mdl.subnode-scores [])
     (refine mdl fit (cut grids 1 None) [los])))
 
 (defn trace [model n path]
@@ -78,10 +76,22 @@
     (-> model (pt.jit.trace xs) (pt.jit.save path))
     (pt.jit.load path)))
 
+(defn detach [mdl]
+  (let [d (fn [xs] (lfor x xs (.to (.detach (.clone x)) mdl.device)))]
+    (-> mdl (.eval ) (.to (pt.device "cpu")))
+    (setv mdl.node-scores       []
+          mdl.edge-scores       []
+          mdl.subnode-scores    []
+          mdl.subnode-actscale  (d mdl.subnode-scores) 
+          mdl.acts-scale-spline (d mdl.acts-scale-spline)
+          mdl.edge-actscale     (d mdl.edge-actscale))
+    mdl))
+
 (defn make-predictor [mdl path params-x params-y mask-x mask-y]
-  (let [df-raw  (pd.read-csv path)
-        xs-raw  (-> (. (get df-raw params-x) values) pt.from-numpy (.float))
-        ys-raw  (-> (. (get df-raw params-y) values) pt.from-numpy (.float))
+  (let [df      (pd.read-csv path)
+        ;df      (get df-raw (.all (> (. (get df-raw (+ mask-x mask-y)) values) 0.0) :axis 1))
+        xs-raw  (-> (. (get df params-x) values) pt.from-numpy (.float))
+        ys-raw  (-> (. (get df params-y) values) pt.from-numpy (.float))
         msk-x   (make-mask mask-x params-x)
         msk-y   (make-mask mask-y params-y)
         x-trafo (partial trafo msk-x)
@@ -91,14 +101,9 @@
         x-scale (partial scale (get (pt.min xs-trf :axis 0) 0)
                                (get (pt.max xs-trf :axis 0) 0))
         y-scale (partial unscale (get (pt.min ys-trf :axis 0) 0)
-                                 (get (pt.max ys-trf :axis 0) 0))
-        _       (-> mdl (.eval ) (.to (pt.device "cpu")))]
-    (setv mdl.node-scores      []
-          mdl.edge-scores      []
-          mdl.subnode-scores   []
-          mdl.subnode-actscale (lfor a mdl.subnode-actscale (.to a mdl.device))
-          mdl.edge-actscale    (lfor a mdl.edge-actscale    (.to a mdl.device)))
-    (fn [x] (with [_ (.no-grad pt)] (-> x x-trafo x-scale mdl y-scale y-trafo)))))
+                                 (get (pt.max ys-trf :axis 0) 0))]
+    (fn [x] (with [_ (.no-grad pt)] 
+      (-> x x-trafo x-scale mdl y-scale y-trafo)))))
 
 (defn num-params [ws]
   (if (< (len ws) 2) 0
@@ -123,3 +128,9 @@
     (plt.xscale "log") (plt.yscale "log") (plt.legend) (plt.grid)
     (plt.xlabel "Number of Prameters") (plt.ylabel "RMSE")
     (plt.show)))
+
+(defn equation [model var]
+  (let [lib ["x" "x^2" "x^3" "x^4" "1/x" "exp" "log" "sqrt" "sin" "tanh" "tan" "abs"]]
+    (.auto-symbolic model :lib lib)
+    (.symbolic-formula model :var var)))
+
