@@ -1,4 +1,5 @@
 __pycache__
+__coconut_cache__
 model
 figures/*
 !figures/vol.png

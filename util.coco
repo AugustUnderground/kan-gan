@@ -1,0 +1,60 @@
+from   typing import Union
+import pandas               as pd
+import torch                as pt
+import numpy                as np
+import kan
+
+type Device    = Union[pt.device,str]
+type DataFrame = pd.DataFrame
+type Tensor    = pt.Tensor
+type Array     = np.ndarray
+type Matrix    = Union[Tensor,Array]
+type MKAN      = kan.MultKAN.MultKAN
+
+def scale(x_min: Matrix, x_max: Matrix, x: Matrix) = (x - x_min) / (x_max - x_min)
+def un_cale(x_min: Matrix, x_max: Matrix, x: Matrix) = ((x_max - x_min) * x) + x_min
+
+case def trafo[Tensor]:
+  type(m: Tensor, x: Tensor) -> Tensor
+  case(m, x if pt.any(m).item()) = (pt.log10(x) * m) + (x * (1 - m))
+  case(_, x) = x
+
+case def un_trafo[Tensor]:
+  type(m: Tensor, x: Tensor) -> Tensor
+  case(m, x if pt.any(m).item()) = (pt.pow(10, x) * m) + (x * (1 - m))
+  case(_, x) = x
+
+def make_mask(xs: list[str], mx: list[str]) = xs |> map$((in)$(?,mx),?) \
+                                            |> list |> pt.tensor |> .float()
+
+def create_dataset ( path: str, xs: list[str], ys: list[str], mx: list[str]
+                   , my: list[str], device: Device = 'cpu', ratio: float = 0.85
+                   ) = dat where:
+  df: DataFrame         = pd.read_csv path
+  n_rows: int           = df.shape[0]
+  idx: Tensor           = (n_rows + 1) |> pt.arange$(1,?,1) |> .float() \
+                        |> pt.multinomial$(?, n_rows) |> .int()
+  idx_train: Tensor     = idx[:int(n_rows * ratio)]
+  idx_valid: Tensor     = idx[int(n_rows * ratio):]
+  df_shuffle            = df.sample(n_rows, replace = False)
+  msk_x: Tensor         = make_mask xs mx |> .to(device)
+  msk_y: Tensor         = make_mask ys my |> .to(device)
+  trf                   = (msk_z,z) => z |> pt.from_numpy |> .to(device) \
+                                         |> .float() |> trafo$(msk_z,?)
+  x_trafo               = df_shuffle[xs].values |> trf$(msk_x,?)
+  y_trafo               = df_shuffle[ys].values |> trf$(msk_y,?)
+  max_x: Tensor         = x_trafo |> pt.max$(?,axis=0) |> .[0]
+  min_x: Tensor         = x_trafo |> pt.min$(?,axis=0) |> .[0]
+  max_y: Tensor         = y_trafo |> pt.max$(?,axis=0) |> .[0]
+  min_y: Tensor         = y_trafo |> pt.min$(?,axis=0) |> .[0]
+  x_scaled: Tensor      = scale min_x max_x x_trafo
+  y_scaled: Tensor      = scale min_y max_y y_trafo
+  x_train: Tensor       = x_scaled[idx_train,:]
+  y_train: Tensor       = y_scaled[idx_train,:]
+  x_valid: Tensor       = x_scaled[idx_valid,:]
+  y_valid: Tensor       = y_scaled[idx_valid,:]
+  dat: dict[str,Tensor] = { 'train_input': x_train, 'train_label': y_train
+                          , 'test_input':  x_valid, 'test_label':  y_valid
+                          , 'min_x': min_x, 'max_x': max_x
+                          , 'min_y': min_y, 'max_y': max_y
+                          , 'msk_x': msk_x, 'msk_y': msk_y }

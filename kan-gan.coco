@@ -1,0 +1,132 @@
+import torch                      as pt
+import numpy                      as np
+import kan
+from   matplotlib import pyplot   as plt
+from   sympy      import lambdify
+from   util       import *
+
+device: Device        = ('cuda:0' if pt.cuda.is_available() else 'cpu') |> pt.device
+
+params_x: list[str]   = ['v_ds_work','i_d_max']
+params_y: list[str]   = ['r_ds_on','r_g','g_fs','v_th','c_iss','c_oss','c_rss']
+mask_x: list[str]     = ['v_ds_work','i_d_max']
+mask_y: list[str]     = ['r_ds_on','g_fs','c_iss','c_oss','c_rss']
+path: str             = './data/gandevices.csv'
+dat: dict[str,Tensor] = create_dataset(path, params_x, params_y, mask_x, mask_y, device = device)
+
+# params_x: list[str] = ['x','y']
+# params_y: list[str] = ['z']
+# f = (x) => pt.exp(pt.sin(pt.pi*x[:,[0]]) + x[:,[1]]**2)
+# dat: dict[str,Tensor] = kan.create_dataset(f, n_var=2, device=device)
+
+grids: list[int]   = [1,2,3,4]
+steps: int         = 50
+k: int             = 3
+rng: int           = 666
+opt: str           = 'LBFGS'
+width: list[int]   = [len(params_x),3,len(params_y)]
+base_fn            = pt.nn.functional.mish
+loss_fn            = pt.nn.L1Loss()
+noise_scale: float = 0.25
+λ: float           = 0.01
+λ_l1: float        = 1.0
+λ_entropy: float   = 2.0
+λ_coef: float      = 0.0
+λ_coefdiff: float  = 0.0
+λ_ent: float       = 2.0
+p_thresh: float    = 0.01
+y_thresh: float    = 10.0
+reg_metric: str    = 'edge_forward_spline_n'
+α: float           = 1.0
+avoid_sing: bool   = True
+
+def step(None, [g] + _ as gs, tl, vl) = step(model, gs, tl, vl) where:
+  model: MKAN = kan.KAN( width        = width
+                       , grid         = g
+                       , k            = k
+                       , seed         = rng
+                       , base_fun     = base_fn
+                       , noise_scale  = noise_scale
+                       , device       = device )
+  _           = model.update_grid_from_samples(dat['train_input'])
+addpattern def step(model, [], tl, vl) = (model, tl, vl)
+addpattern def step(model, [g] + gs, tl, vl) = step(refined, gs, rtl, rvl) where:
+  refined: MKAN             = if tl then model.refine(g) else model
+  results: dict[str,Tensor] = refined.fit( dat
+                                         , opt                  = opt
+                                         , lr                   = α
+                                         , steps                = steps
+                                         , lamb                 = λ
+                                         , lamb_l1              = λ_l1
+                                         , lamb_coef            = λ_coef
+                                         , lamb_coefdiff        = λ_coefdiff
+                                         , lamb_entropy         = λ_ent
+                                         , reg_metric           = reg_metric 
+                                         , y_th                 = y_thresh
+                                         , loss_fn              = loss_fn 
+                                         , singularity_avoiding = avoid_sing
+                                         , in_vars              = params_x
+                                         , out_vars             = params_y )
+  rtl                       = tl + results['train_loss']
+  rvl                       = vl + results['test_loss']
+
+model, train_loss, valid_loss = step(None, grids, [], [])
+
+model.plot(),plt.show()
+model.prune()
+model.plot(),plt.show()
+
+plt.plot(train_loss, label = 'train')
+plt.plot(valid_loss, label = 'valid')
+plt.xlabel('# Step')
+plt.ylabel('RSME')
+plt.yscale('log')
+plt.grid()
+plt.legend()
+plt.show()
+
+n_params: int = grids |> np.array |> (*)$(?,len(width))
+tvg = train_loss[(steps-1)::steps]
+vvg = valid_loss[(steps-1)::steps]
+plt.plot(n_params, tvg, marker='o', label = 'train')
+plt.plot(n_params, vvg, marker='o', label = 'valid')
+plt.xlabel('# Params')
+plt.ylabel('RMSE')
+plt.xscale('log')
+plt.yscale('log')
+plt.grid()
+plt.legend()
+plt.show()
+
+model.get_act(dat['train_input'])
+model.plot(in_vars = params_x, out_vars = params_y, sample = True)
+plt.show()
+
+model.get_fun(0,0,0)
+plt.show()
+
+prd_m = dat['test_input'] |> model |> .detach() |> .cpu() |> .numpy()
+tru_m = dat['test_label'] |> .cpu() |> .numpy()
+
+plt.scatter(tru_m, prd_m)
+plt.xlabel('Truth')
+plt.ylabel('Prediction')
+plt.grid()
+plt.show()
+
+sym_lib: list[str] = ['x','x^2','x^3','x^4','1/x','exp','log','sqrt','tanh','tan','abs']
+
+model.auto_symbolic(lib = sym_lib)
+formula = model.symbolic_formula(var = params_x)[0][0]
+print(kan.ex_round(formula, 3))
+
+func = lambdify(params_x, formula)
+
+prd_f = dat['test_input'] |> .cpu() |> .numpy() |> np.hsplit$(?,2) |> tuple |*> func
+tru_f = dat['test_label'] |> .cpu() |> .numpy()
+
+plt.scatter(tru_f, prd_f)
+plt.xlabel('Truth')
+plt.ylabel('Prediction')
+plt.grid()
+plt.show()
